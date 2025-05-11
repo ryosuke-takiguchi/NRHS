@@ -12,3 +12,4 @@ allocation_system/temp/logs/*.log
 # 出力されたCSVファイル
 allocation_system/output/csv/*.csv
 allocation_system/temp/csv/*.csv
+allocation_system/output/logs/*.csv
