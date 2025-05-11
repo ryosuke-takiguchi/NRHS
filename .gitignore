@@ -1,0 +1,14 @@
+# pythonキャッシュ
+__pycache__/
+
+# 仮想環境
+.venv/
+
+# ログファイル全般
+logs/*.log
+allocation_system/output/logs/*.log
+allocation_system/temp/logs/*.log
+
+# 出力されたCSVファイル
+allocation_system/output/csv/*.csv
+allocation_system/temp/csv/*.csv
