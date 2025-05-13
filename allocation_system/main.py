@@ -1,14 +1,17 @@
 import pandas as pd
 from tqdm import tqdm
+
 from allocation_system.utils import hankaku_to_zenkaku_numbers, make_range_list
 from allocation_system.allocator import perform_allocation
 from allocation_system.api_runner import run_api
+from allocation_system.config_ini import IniConfig
+from allocation_system.csv_utils import read_csv_safe
 
 
 def process_allocation_row(
     allocation_rule, bmn_seg_record, kmk_master,
     bmn_master, existing_kmk_codes, existing_bmn_codes,
-    existing_seg_codes, swk_source_df, den_date, LOGGER=None
+    existing_seg_codes, swk_source_df, den_date, bmn_rec, LOGGER=None
 ):
     """
     単一の配賦情報に基づいて、対象科目と対象部門を抽出し、配賦処理を実行する。
@@ -17,6 +20,7 @@ def process_allocation_row(
     """
     if LOGGER:
         LOGGER.debug(f"配賦パターンNO:{allocation_rule['パターンＮＯ']}【{allocation_rule['パターン名称']}】の配賦処理を開始")
+
     tekiyo = f"配賦パターンNO:{allocation_rule['パターンＮＯ']}　{allocation_rule['パターン名称']}"
 
     # 対象科目抽出
@@ -38,18 +42,24 @@ def process_allocation_row(
             bmn_range.extend(make_range_list(min_bmn, max_bmn))
     target_bmn_list = sorted(set(existing_bmn_codes) & set(bmn_range))
 
+    # 配賦実行
     swk_fragment_df, bmn_seg_record = perform_allocation(
         allocation_rule, bmn_seg_record, target_kmk_list,
-        target_bmn_list, existing_seg_codes, swk_source_df, tekiyo, LOGGER
+        target_bmn_list, existing_seg_codes, swk_source_df,
+        tekiyo, bmn_rec, LOGGER
     )
+
     return swk_fragment_df, bmn_seg_record
 
 
 def main_process(
     bmn_master, seg_master, kmk_master,
-    bmn_seg_record, hif_information, den_date, START_YM, END_YM, LOGGER=None
+    bmn_seg_record, hif_information, den_date,
+    START_YM, END_YM, LOGGER=None
 ):
-    # 配賦種別ごとの処理ループ
+    """
+    複数レベルの配賦処理を順次実行する。
+    """
     for allocation_level, keyword, j in [
         ("1次配賦", "一次配賦", "0"),
         ("2次配賦", "二次配賦", "1"),
@@ -61,10 +71,11 @@ def main_process(
             (hif_information["配賦区分"] == 0) &
             (hif_information["パターン名称"].str.startswith(keyword, na=False))
         ]
+
         bmn_seg_record = main_process1(
             allocation_level, bmn_master, filtered_hif_info,
-            seg_master, kmk_master,
-            bmn_seg_record, den_date, START_YM, END_YM, j, LOGGER
+            seg_master, kmk_master, bmn_seg_record,
+            den_date, START_YM, END_YM, j, LOGGER
         )
 
 
@@ -74,34 +85,42 @@ def main_process1(
     den_date, START_YM, END_YM, j, LOGGER=None
 ):
     """
-    単一レベルの配賦処理を実行し、CSVに出力します。
+    単一レベルの配賦処理を実行し、CSVに出力し、APIで会計システムに取り込む。
     """
     if LOGGER:
         LOGGER.info(f"{allocation_level}の配賦処理を開始します")
+
+    TMPFOLDER = IniConfig().get('FilesDirectory', 'TEMPFOLDER')
+    bmn_rec_csv = TMPFOLDER + r'\csv\Sample3.csv'
+    bmn_rec_log = TMPFOLDER + r'\logs\Sample3.log'
+
+    run_api(bmn_rec_csv, bmn_rec_log, "2", "9995", LOGGER, START_YM, END_YM)
+    bmn_rec = read_csv_safe(LOGGER=LOGGER, filepath=bmn_rec_csv)
 
     existing_kmk_codes = kmk_master[kmk_master["SumKbn"] == 0]["GCode"].tolist()
     existing_bmn_codes = sorted([int(x) for x in bmn_master[bmn_master["SumKbn"] == 0]["GCode"].tolist()])
     existing_seg_codes = sorted([int(x) for x in seg_master[seg_master["SumKbn"] == 0]["GCode"].tolist()])
 
     columns = [
-        '伝票番号','借方科目', '借方部門', '借方セグメント', '借方税CD', '借方金額', 
+        '伝票番号', '借方科目', '借方部門', '借方セグメント', '借方税CD', '借方金額',
         '貸方科目', '貸方部門', '貸方セグメント', '貸方税CD', '貸方金額', '摘要文字列'
     ]
     swk_source_df = pd.DataFrame(columns=columns)
 
     for i in tqdm(range(len(filtered_hif_info)), desc=f"{allocation_level}計算処理実行中", unit="件"):
         allocation_rule = filtered_hif_info.iloc[i].fillna("").to_dict()
-        swk_fragment_df, bmn_seg_record= process_allocation_row(
-            allocation_rule, bmn_seg_record,
-            kmk_master, bmn_master, existing_kmk_codes,
-            existing_bmn_codes, existing_seg_codes,
-            swk_source_df, den_date, LOGGER
+        
+        swk_fragment_df, bmn_seg_record = process_allocation_row(
+            allocation_rule, bmn_seg_record, kmk_master, bmn_master,
+            existing_kmk_codes, existing_bmn_codes, existing_seg_codes,
+            swk_source_df, den_date, bmn_rec, LOGGER
         )
         swk_source_df = pd.concat([swk_source_df, swk_fragment_df], ignore_index=True)
 
     if LOGGER:
         LOGGER.info(f"{allocation_level}の配賦処理が完了しました")
 
+    # 共通列の追加
     swk_source_df["データ基準"] = "0"
     swk_source_df["データ種別"] = "99"
     swk_source_df["仕訳入力形式"] = "1002"
@@ -118,29 +137,36 @@ def main_process1(
     swk_source_df["貸方税率区分"] = ""
     swk_source_df["貸方事業者区分"] = ""
 
-    
-    swk_source_df = swk_source_df[
-        ["データ基準", "データ種別", "仕訳入力形式", "入力画面NO", "伝票日付", "伝票番号",
-        "借方科目", "借方補助", "借方部門", "借方セグメント", "借方セグメント2", "借方資金繰り", "借方税CD", "借方税率区分", "借方事業者区分", "借方金額",
-        "貸方科目", "貸方補助", "貸方部門", "貸方セグメント", "貸方セグメント2", "貸方資金繰り", "貸方税CD", "貸方税率区分", "貸方事業者区分", "貸方金額", "摘要文字列"]
-        ]
-       
-    swk_source_df.to_csv(rf"./allocation_system/output/csv/{allocation_level}.csv", index=False, encoding="shift_jis")
+    # 列順を明示的に指定して保存
+    swk_source_df = swk_source_df[[
+        "データ基準", "データ種別", "仕訳入力形式", "入力画面NO", "伝票日付", "伝票番号",
+        "借方科目", "借方補助", "借方部門", "借方セグメント", "借方セグメント2", "借方資金繰り",
+        "借方税CD", "借方税率区分", "借方事業者区分", "借方金額",
+        "貸方科目", "貸方補助", "貸方部門", "貸方セグメント", "貸方セグメント2", "貸方資金繰り",
+        "貸方税CD", "貸方税率区分", "貸方事業者区分", "貸方金額", "摘要文字列"
+    ]]
+
+    # CSV出力
+    OUTPUTFOLDER = IniConfig().get('FilesDirectory', 'OUTPUTFOLDER')
+    csv_path = rf"{OUTPUTFOLDER}/csv/{allocation_level}.csv"
+    log_path = rf"{OUTPUTFOLDER}/logs/{allocation_level}.log"
+    swk_source_df.to_csv(csv_path, index=False, encoding="shift_jis")
     print("csv出力完了")
     print("配賦結果の取り込み開始")
     print("データインポート中...")
+
+    # APIでインポート
     in_out_no = "910" + str(j)
     run_api(
-        file_path = rf"./allocation_system/output/csv/{allocation_level}.csv",
-        log_path = rf"./allocation_system/output/logs/{allocation_level}.log",
-        proc_kbn= "1",
-        number = in_out_no,
-        LOGGER = LOGGER,
-        start_ym = START_YM,
-        end_ym = END_YM
+        file_path=csv_path,
+        log_path=log_path,
+        proc_kbn="1",
+        number=in_out_no,
+        LOGGER=LOGGER,
+        start_ym=START_YM,
+        end_ym=END_YM
     )
+
     print("データインポート完了")
 
-    
-    
     return bmn_seg_record

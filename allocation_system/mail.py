@@ -3,12 +3,13 @@ from email.header import Header
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
-from allocation_system.config_ini import IniConfig
+# from allocation_system.config_ini import IniConfig
 
 def send_html_completion_email():
-    ini_config = IniConfig()
+    # ini_config = IniConfig()
     
-    to_email = ini_config.get("Mail" ,"SENDADDRESS")  # 宛先を入力
+    # to_email = ini_config.get("Mail" ,"SENDADDRESS")  # 宛先を入力
+    to_email = "ryosuke_takiguchi@mjs.co.jp"
     subject = "テストメール"
     html_body = "<html><body><h1>これはテストメールです。</h1></body></html>"
 
@@ -33,3 +34,4 @@ def send_html_completion_email():
         print(f"メール送信に失敗しました: {e}")
 
 
+send_html_completion_email()
